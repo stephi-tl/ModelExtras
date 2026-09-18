@@ -3,7 +3,7 @@ name: Build ModelExtras
 
 on:
   push:
-    branches: [main]
+    branches: [main, skygfx-deferred-compat-test]
   pull_request:
     branches: [main]
   workflow_dispatch:
