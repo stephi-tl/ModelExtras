@@ -6,8 +6,111 @@
 #include "utils/render.h"
 #include "../damage.h"
 #include <CWeather.h>
+#include <CBike.h>
 
 extern bool gbProperShadersDetected;
+extern bool gbSkyGfxDeferredDetected;
+
+struct SkyGfxExternalHeadlight
+{
+    void *vehicle;
+    int side;
+    float pos[3];
+    float dir[3];
+    float color[3];
+    float intensityMul;
+    float rangeMul;
+    int colorOverride;
+};
+
+using SkyGfxRegisterDeferredHeadlightFn = void (__cdecl *)(const SkyGfxExternalHeadlight *);
+
+static SkyGfxRegisterDeferredHeadlightFn GetSkyGfxDeferredRegistrar()
+{
+    static SkyGfxRegisterDeferredHeadlightFn fn = nullptr;
+    if (fn)
+        return fn;
+
+    HMODULE hSkyGfx = GetModuleHandleA("skygfx.asi");
+    if (!hSkyGfx)
+        return nullptr;
+
+    fn = reinterpret_cast<SkyGfxRegisterDeferredHeadlightFn>(
+        GetProcAddress(hSkyGfx, "SkyGfx_RegisterDeferredHeadlight"));
+    return fn;
+}
+
+static void RegisterSkyGfxHeadlight(CVehicle *pVeh, VehicleDummy &dummy, int side,
+                                    float intensityMul, float rangeMul)
+{
+    auto fn = GetSkyGfxDeferredRegistrar();
+    if (!fn || !pVeh)
+        return;
+
+    dummy->Update();
+    DummyConfig &c = dummy->Get();
+    if (!c.frame)
+        return;
+
+    RwFrame *parent = RwFrameGetParent(c.frame);
+    bool isBike = pVeh->m_nVehicleSubClass == VEHICLE_BIKE;
+    bool isDamaged = false;
+    if (c.damagePanel != -1 || c.damageDoor != -1) {
+        isDamaged = CarUtil::IsDummyDamaged(pVeh, c);
+    } else if (parent) {
+        isDamaged = Util::IsFrameDamaged(pVeh, parent);
+    }
+    if (!isDamaged && parent) {
+        isDamaged = !FrameUtil::IsOkAtomicVisible(parent);
+    }
+    if (!isBike && pVeh->GetIsOnScreen() && isDamaged)
+        return;
+
+    CMatrix dummyMat = *(CMatrix *)&c.frame->ltm;
+
+    CVector lightPos = pVeh->TransformFromObjectSpace(c.shadow.position);
+    if (isBike && c.leanAffected)
+    {
+        CBike *pBike = static_cast<CBike *>(pVeh);
+        bool wasCalculated = pBike->m_bLeanMatrixCalculated;
+        if (!wasCalculated)
+            pBike->CalculateLeanMatrix();
+        lightPos = pBike->m_mLeanMatrix * c.shadow.position;
+        pBike->m_bLeanMatrixCalculated = wasCalculated;
+    }
+
+    CMatrix vehMat = pVeh->GetMatrix();
+    CVector localDir;
+    localDir.x = CVector::Dot(dummyMat.up, vehMat.right);
+    localDir.y = CVector::Dot(dummyMat.up, vehMat.up);
+    localDir.z = CVector::Dot(dummyMat.up, vehMat.at);
+    if (c.mirroredX)
+        localDir.x = -localDir.x;
+
+    if (localDir.Magnitude() < 0.1f || localDir.y <= 0.0f)
+        localDir = CVector(0.0f, 1.0f, -0.10f);
+    localDir.Normalize();
+
+    CVector lightDir = vehMat.right * localDir.x + vehMat.up * localDir.y + vehMat.at * localDir.z;
+    lightDir.Normalize();
+
+    SkyGfxExternalHeadlight out{};
+    out.vehicle = pVeh;
+    out.side = side;
+    out.pos[0] = lightPos.x;
+    out.pos[1] = lightPos.y;
+    out.pos[2] = lightPos.z;
+    out.dir[0] = lightDir.x;
+    out.dir[1] = lightDir.y;
+    out.dir[2] = lightDir.z;
+    out.color[0] = c.corona.color.r / 255.0f;
+    out.color[1] = c.corona.color.g / 255.0f;
+    out.color[2] = c.corona.color.b / 255.0f;
+    out.intensityMul = std::clamp(intensityMul, 0.0f, 2.0f);
+    out.rangeMul = std::clamp(rangeMul, 0.25f, 4.0f);
+    out.colorOverride = c.hasCustomColor ? 1 : 0;
+    fn(&out);
+}
 
 void HeadlightComponent::RegisterMaterials(std::unordered_map<uint32_t, eMaterialType>& matMap) {
     matMap[VEHCOL_HEADLIGHT_LEFT.ToInt()] = eMaterialType::HeadLightLeft;
@@ -95,7 +198,8 @@ void HeadlightComponent::Process(CVehicle* pVeh, VehLightData& data) {
             data.bLongLightsOn = false;
         }
 
-        bool canToggleLongLights = !(gbProperShadersDetected && !LightsConfig::Get().gbLightPointLights);
+        bool canToggleLongLights = gbSkyGfxDeferredDetected ||
+            !(gbProperShadersDetected && !LightsConfig::Get().gbLightPointLights);
         if (InputMgr::IsKeyJustDown(LightsConfig::Get().nLongLightKey) && isHeadlightsActive && canToggleLongLights) {
             data.bLongLightsOn = !data.bLongLightsOn;
             AudioMgr::PlaySwitchSound(pVeh);
@@ -112,7 +216,7 @@ void HeadlightComponent::Process(CVehicle* pVeh, VehLightData& data) {
             if (isHeadlightsActive && AreHeadlightsOpen(pVeh, data)) {
                 bool isFoggy = Util::IsFoggy();
                 std::string texName = data.bLongLightsOn ? "headlight_long" : "headlight_short";
-                bool shadow = !gbProperShadersDetected;
+                bool shadow = !(gbProperShadersDetected || gbSkyGfxDeferredDetected);
                 bool highlight = isFoggy || data.bLongLightsOn;
 
                 LightManager::RenderLight(pVeh, data, eMaterialType::HeadLightLeft, isLeftFrontOk, shadow ? texName : "", LightsConfig::Get().headlightSz, highlight);
@@ -138,7 +242,7 @@ void HeadlightComponent::Render(CVehicle* pControlVeh, CVehicle* pTowedVeh, VehL
     bool bTickRegistered = (data.nHeadlightTickFrame == CTimer::m_FrameCounter);
     bool isFoggy = Util::IsFoggy();
     std::string texName = data.bLongLightsOn ? "headlight_long" : "headlight_short";
-    bool shadow = !gbProperShadersDetected;
+    bool shadow = !(gbProperShadersDetected || gbSkyGfxDeferredDetected);
     bool highlight = isFoggy || data.bLongLightsOn;
 
     if (isHeadlightLeftOk || isHeadlightRightOk) {
@@ -150,10 +254,37 @@ void HeadlightComponent::Render(CVehicle* pControlVeh, CVehicle* pTowedVeh, VehL
         if (isHeadlightRightOk) {
             LightManager::RenderLights(pControlVeh, pTowedVeh, data, eMaterialType::HeadLightRight, true, shadow ? texName : "", LightsConfig::Get().headlightSz, highlight, true, bTickRegistered);
         }
+
+        // When SkyGfx is present, feed it the exact ModelExtras headlight dummies.
+        // This keeps deferred beams aligned with custom/animated/pop-up lights while
+        // preserving ModelExtras coronas and emissive materials. SkyGfx de-duplicates
+        // these against its vanilla fallback by vehicle + side.
+        if (gbSkyGfxDeferredDetected && GetSkyGfxDeferredRegistrar()) {
+            float highBeamRange = 1.0f + (LightsConfig::Get().fHighBeamPointLightMul - 1.0f) *
+                                  std::clamp(data.fHighBeamFactor, 0.0f, 1.0f);
+
+            if (isHeadlightLeftOk && data.bLightStates[eMaterialType::HeadLightLeft]) {
+                float factor = data.fLightFactor[eMaterialType::HeadLightLeft];
+                if (factor > 0.001f) {
+                    for (auto &dummy : data.dummies[eMaterialType::HeadLightLeft])
+                        RegisterSkyGfxHeadlight(pControlVeh, dummy, 0, factor, highBeamRange);
+                }
+            }
+
+            if (isHeadlightRightOk && data.bLightStates[eMaterialType::HeadLightRight]) {
+                float factor = data.fLightFactor[eMaterialType::HeadLightRight];
+                if (factor > 0.001f) {
+                    for (auto &dummy : data.dummies[eMaterialType::HeadLightRight])
+                        RegisterSkyGfxHeadlight(pControlVeh, dummy, 1, factor, highBeamRange);
+                }
+            }
+        }
     }
 }
 
 void HeadlightComponent::ProcessPointLights(CVehicle* pVeh, VehLightData& data) {
+    if (gbSkyGfxDeferredDetected && GetSkyGfxDeferredRegistrar())
+        return;
     if (!CanVehicleHaveHeadlights(pVeh)) return;
     bool isHeadlightsOn = (pVeh->bLightsOn || CarUtil::IsLightsForcedOn(pVeh) || (Util::IsNightTime() && !Util::IsEngineOff(pVeh))) && !CarUtil::IsLightsForcedOff(pVeh);
 

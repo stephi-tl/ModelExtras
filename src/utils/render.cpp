@@ -490,8 +490,12 @@ void RenderUtil::RegisterShadowDirectional(const DummyConfig *pConfig, const std
     }
 
     extern bool gbProperShadersDetected;
+    extern bool gbSkyGfxDeferredDetected;
     extern bool gbLightPointLights;
-    if (gbProperShadersDetected && (gbLightPointLights || pConfig->lightType == eMaterialType::HeadLightLeft || pConfig->lightType == eMaterialType::HeadLightRight))
+    bool isHeadlight = pConfig->lightType == eMaterialType::HeadLightLeft ||
+                       pConfig->lightType == eMaterialType::HeadLightRight;
+    if ((gbProperShadersDetected && (gbLightPointLights || isHeadlight)) ||
+        (gbSkyGfxDeferredDetected && isHeadlight))
     {
         return;
     }

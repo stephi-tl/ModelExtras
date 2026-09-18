@@ -39,6 +39,13 @@
 constexpr uint32_t TEST_CHEAT = 0x0ADC;
 
 bool gbProperShadersDetected = false;
+bool gbSkyGfxDeferredDetected = false;
+
+static bool HasSkyGfxDeferredBridge()
+{
+    HMODULE hSkyGfx = GetModuleHandleA("skygfx.asi");
+    return hSkyGfx && GetProcAddress(hSkyGfx, "SkyGfx_RegisterDeferredHeadlight") != nullptr;
+}
 
 void ModelExtras::Init()
 {
@@ -50,9 +57,14 @@ void ModelExtras::Init()
     {
         DataMgr::Init();
         gbProperShadersDetected = GetModuleHandle("ProperShaders.asi") != nullptr;
+        gbSkyGfxDeferredDetected = HasSkyGfxDeferredBridge();
         if (gbProperShadersDetected)
         {
             LOG(INFO) << "Proper Shaders detected, enabling compatibility mode for ModelExtras lights.";
+        }
+        if (gbSkyGfxDeferredDetected)
+        {
+            LOG(INFO) << "SkyGfx deferred headlights detected, using ModelExtras headlight dummy bridge.";
         }
 
         if (SAMP::IsPresent())
