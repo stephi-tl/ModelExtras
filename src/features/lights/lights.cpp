@@ -13,6 +13,12 @@ int gGlobalShadowIntensity = 80;
 bool gbLightPointLights = true;
 bool gbSirenPointLights = false;
 
+static bool HasSkyGfxDeferredBridge()
+{
+	HMODULE hSkyGfx = GetModuleHandleA("skygfx.asi");
+	return hSkyGfx && GetProcAddress(hSkyGfx, "SkyGfx_RegisterDeferredHeadlight") != nullptr;
+}
+
 void Lights::Init() {
     ReloadConfig();
     if (!m_bEnabled) {
@@ -21,7 +27,17 @@ void Lights::Init() {
 
     LightManager::Init();
 
-    patch::Nop(0x6E2722, 19);	  // CVehicle::DoHeadLightReflection
+    // ModelExtras normally disables the vanilla headlight-reflection call.
+    // SkyGfx uses that call as its fallback for unadapted vehicles, so leave it
+    // intact when the deferred bridge is present. Custom ModelExtras dummies
+    // are submitted separately and override the vanilla positions.
+    Events::initGameEvent += []()
+    {
+        if (!HasSkyGfxDeferredBridge())
+            patch::Nop(0x6E2722, 19); // CVehicle::DoHeadLightReflection
+        else
+            LOG(INFO) << "SkyGfx bridge active: preserving vanilla headlight reflection call for fallback vehicles.";
+    };
 	patch::SetUChar(0x6E1A22, 0); // CVehicle::DoTailLightEffect
 
 	// CVehicle::DoHeadLightEffect
